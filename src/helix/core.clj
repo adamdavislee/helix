@@ -278,6 +278,7 @@
                                       (meta fst))]
                          (if-let [pos (:helix/auto-deps-pos m)]
                            (recur
+                            ;; TODO what if hooks are nested?
                             (-> (vec node)
                                 (update
                                  pos
