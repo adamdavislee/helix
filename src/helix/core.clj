@@ -1,7 +1,9 @@
 (ns helix.core
-  (:require [helix.impl.analyzer :as hana]
-            [helix.impl.props :as impl.props]
-            [clojure.string :as string]))
+  (:require
+   [helix.impl.analyzer :as hana]
+   [helix.impl.props :as impl.props]
+   [clojure.string :as string]
+   [clojure.zip :as zip]))
 
 
 (defmacro $
@@ -88,6 +90,24 @@
                         ~@children))
 
 
+;;
+;; -- component definition
+;;
+
+
+(defmacro determine-deps-array
+  [deps-val body]
+  (doto (cond
+          (vector? deps-val) `(cljs.core/array ~@deps-val)
+
+          (= :auto deps-val) `(cljs.core/array ~@(hana/resolve-local-vars &env body))
+
+          (symbol? deps-val) `(cljs.core/to-array ~deps-val)
+
+          :else deps-val)
+    prn))
+
+
 (defn- fnc*
   [display-name props-bindings body]
   ;; maybe-ref for react/forwardRef support
@@ -146,10 +166,12 @@
         flag-check-invalid-hooks-usage? (:check-invalid-hooks-usage feature-flags true)
         flag-metadata-optimizations (:metadata-optimizations feature-flags)
 
-
-        body (cond-> body
-               opts-map? (rest)
-               flag-metadata-optimizations (hana/map-forms-with-meta meta->form))
+        body (if opts-map?
+               (rest body)
+               body)
+        body (if flag-metadata-optimizations
+               (hana/map-forms-with-meta body meta->form)
+               body)
 
         ;; TODO add fast refresh support somehow?
         _hooks (hana/find-hooks body)]
@@ -166,6 +188,24 @@
     `(-> ~(fnc* nil props-bindings
                 body)
          ~@(-> opts :wrap))))
+
+
+(defn- skip
+  "Like clojure.zip/next, but skips delving deeper into the current node, moving
+  either right or up to the right or ending."
+  [loc]
+  (if (= :end (loc 1))
+    loc
+    (or
+     ;; -- skip checking branch and going down
+     ;; (and (branch? loc) (down loc))
+     ;; --
+     (zip/right loc)
+     (loop [l loc]
+       (if (zip/up l)
+         (or (zip/right (zip/up l))
+             (recur (zip/up l)))
+         [(zip/node l) :end])))))
 
 
 (defmacro defnc
@@ -220,6 +260,42 @@
         body (cond-> body
                opts-map? (rest)
                flag-metadata-optimizations (hana/map-forms-with-meta meta->form))
+
+        body (loop [loc (hana/seqable-zip body)
+                    max-loop 100]
+               (let [node (zip/node loc)]
+                 (cond
+                   (zip/end? loc) (zip/root loc)
+
+                   (= 0 max-loop) (throw (ex-info
+                                          "Infinite loop"
+                                          {:form (zip/node loc)}))
+
+                   (list? node)
+                   (let [fst (first node)]
+                     (if (symbol? fst)
+                       (let [m (merge (:meta (hana/resolve-var &env fst))
+                                      (meta fst))]
+                         (if-let [pos (:helix/auto-deps-pos m)]
+                           (recur
+                            (-> (vec node)
+                                (update
+                                 pos
+                                 (fn [deps]
+                                   `(determine-deps-array ~deps ~node)))
+                                (->> (into '())
+                                     (zip/replace loc))
+                                (skip)
+                                (doto (-> zip/node prn))
+                                )
+                            (dec max-loop))
+                           (recur (zip/next loc)
+                                  (dec max-loop))))
+                       (recur (zip/next loc)
+                              (dec max-loop))))
+
+                   :else (recur (zip/next loc)
+                                (dec max-loop)))))
 
         hooks (hana/find-hooks body)
 
@@ -297,7 +373,7 @@
         auto-deps-pos (->> (map-indexed vector params)
                            (some (fn [[i param]]
                                    (when (:deps (meta param))
-                                     i))))]
+                                     (inc i)))))]
     (when flag-check-invalid-hooks-usage?
       (when-some [invalid-hooks (->> (map hana/invalid-hooks-usage body)
                                      (flatten)
