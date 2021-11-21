@@ -37,13 +37,7 @@
                &env
                {:form (cons type args)
                 :props-form (first args)}))
-  (let [inferred (hana/inferred-type &env type)
-        native? (or (keyword? type)
-                    (string? type)
-                    (= inferred 'string)
-                    (= inferred 'cljs.core/Keyword)
-                    (:native (meta type)))
-        type (if (keyword? type)
+  (let [type (if (keyword? type)
                (name type)
                type)]
     (cond
@@ -51,9 +45,7 @@
       `^js/React.Element (.createElement
                           (get-react)
                           ~type
-                          ~(if native?
-                             `(impl.props/dom-props ~(first args))
-                             `(impl.props/props ~(first args)))
+                          (impl.props/props ~(first args))
                           ~@(rest args))
 
       :else `^js/React.Element (.createElement (get-react) ~type nil ~@args))))
